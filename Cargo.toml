@@ -181,6 +181,27 @@ tokio = { version = "1", features = [
     "process",
 ] }
 url = "2.2"
+clap = { version = "4.0", features = ["derive"] }
+
+[[example]]
+name = "get_token"
+path = "examples/get_token.rs"
+
+[[example]]
+name = "play"
+path = "examples/play.rs"
+
+[[example]]
+name = "play_connect"
+path = "examples/play_connect.rs"
+
+[[example]]
+name = "playlist_tracks"
+path = "examples/playlist_tracks.rs"
+
+[[example]]
+name = "download_track"
+path = "examples/download_track.rs"
 
 [package.metadata.deb]
 maintainer = "Librespot Organization <noreply@github.com>"
