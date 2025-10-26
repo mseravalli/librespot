@@ -1853,6 +1853,7 @@ dependencies = [
  "librespot-playback",
  "librespot-protocol",
  "log",
+ "rand 0.8.5",
  "sha1",
  "sysinfo",
  "thiserror 2.0.17",

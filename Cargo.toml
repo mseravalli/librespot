@@ -183,6 +183,9 @@ tokio = { version = "1", features = [
 url = "2.2"
 clap = { version = "4.0", features = ["derive"] }
 
+[dev-dependencies]
+rand = {version = "0"}
+
 [[example]]
 name = "get_token"
 path = "examples/get_token.rs"

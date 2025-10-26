@@ -33,6 +33,7 @@ use librespot::{
     metadata::{Album, Metadata, Playlist, Track, audio::file::AudioFileFormat},
 };
 use log::LevelFilter;
+use rand::RngCore;
 
 const CACHE: &str = ".cache";
 const CACHE_FILES: &str = ".cache/files";
@@ -69,6 +70,31 @@ fn stream_data_rate(format: AudioFileFormat) -> Option<usize> {
     };
     let data_rate: f32 = kbps * 1024.;
     Some(data_rate.ceil() as usize)
+}
+
+async fn retry<T, E, F, Fut>(mut operation: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Debug,
+{
+    let max_attempts = 5;
+    let mut rng = rand::thread_rng();
+    for attempt in 1..=max_attempts {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                println!("Attempt {} failed: {:?}", attempt, err);
+                if attempt == max_attempts {
+                    return Err(err);
+                }
+            }
+        }
+        let jitter = rng.next_u64() % 5000;
+        let dur = std::time::Duration::from_millis(5000 * (1 << (attempt - 1)) + jitter);
+        std::thread::sleep(dur);
+    }
+    unreachable!()
 }
 
 fn format_extension(format: AudioFileFormat) -> Option<String> {
@@ -150,9 +176,9 @@ async fn download_track(track: Track, session: &Session) -> Result<(), Error> {
         "Could not convert provided format: {:?}",
         format
     )))?;
-    let enctypted_file = AudioFile::open(session, file_id, bytes_per_second).await?;
+    let enctypted_file = retry(|| AudioFile::open(session, file_id, bytes_per_second)).await?;
 
-    let key = session.audio_key().request(spotify_id, file_id).await?;
+    let key = retry(|| session.audio_key().request(spotify_id, file_id)).await?;
     let mut decrypted_file = AudioDecrypt::new(Some(key), enctypted_file);
 
     let mut file = File::create(&filename).unwrap();
