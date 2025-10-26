@@ -34,6 +34,7 @@ use librespot::{
 };
 use log::LevelFilter;
 use rand::RngCore;
+use std::process::Command;
 
 const CACHE: &str = ".cache";
 const CACHE_FILES: &str = ".cache/files";
@@ -186,7 +187,49 @@ async fn download_track(track: Track, session: &Session) -> Result<(), Error> {
 
     println!("Track {} downloaded successfully", filename);
 
+    tag_file(format, &filename, &artists, &track).await?;
+
     Ok(())
+}
+
+async fn tag_file(
+    format: AudioFileFormat,
+    filename: &str,
+    artist: &str,
+    track: &Track,
+) -> Result<(), Error> {
+    match format {
+        AudioFileFormat::OGG_VORBIS_320
+        | AudioFileFormat::OGG_VORBIS_160
+        | AudioFileFormat::OGG_VORBIS_96 => (),
+        _ => {
+            return Err(Error::invalid_argument(format!(
+                "Cannot process format {:?}",
+                format
+            )));
+        }
+    }
+    let output = Command::new("vorbiscomment")
+        .args([
+            "-a",
+            filename,
+            "-t",
+            format!("ARTIST={}", artist).as_str(),
+            "-t",
+            format!("TRACKNUMBER={}", track.number).as_str(),
+            "-t",
+            format!("ALBUM={}", &track.album.name).as_str(),
+            "-t",
+            format!("TITLE={}", &track.name).as_str(),
+        ])
+        .output()?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(Error::internal(format!("vorbiscomment failed: {}", stderr)))
 }
 
 #[tokio::main]
