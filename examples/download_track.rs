@@ -45,6 +45,8 @@ struct Args {
     /// The URI of the track, album or playlist to download.
     #[clap(short, long)]
     uri: String,
+    #[clap(short, long)]
+    dest_dir: String,
 }
 
 fn stream_data_rate(format: AudioFileFormat) -> Option<usize> {
@@ -118,7 +120,7 @@ fn format_extension(format: AudioFileFormat) -> Option<String> {
     }
 }
 
-async fn download_track(track: Track, session: &Session) -> Result<(), Error> {
+async fn download_track(base_dir: &str, track: Track, session: &Session) -> Result<(), Error> {
     let artists = track
         .artists
         .iter()
@@ -149,14 +151,15 @@ async fn download_track(track: Track, session: &Session) -> Result<(), Error> {
             Some(&file_id) => Some((*format, file_id)),
             _ => None,
         })
-        .ok_or(Error::unavailable("None of the formats matched"))?;
+        .ok_or(Error::unavailable(format!(
+            "None of the formats matched for {}: {:?}",
+            &track.name, &track.files
+        )))?;
 
     let ext = format_extension(format).ok_or(Error::unavailable(format!(
         "Could not find extension for {:?}",
         format
     )))?;
-    // TODO: better handle base dir
-    let base_dir = "/tmp";
     let filename = format!(
         "{}/{}_{}_{}.{}",
         base_dir,
@@ -182,8 +185,8 @@ async fn download_track(track: Track, session: &Session) -> Result<(), Error> {
     let key = retry(|| session.audio_key().request(spotify_id, file_id)).await?;
     let mut decrypted_file = AudioDecrypt::new(Some(key), enctypted_file);
 
-    let mut file = File::create(&filename).unwrap();
-    io::copy(&mut decrypted_file, &mut file).unwrap();
+    let mut file = File::create(&filename)?;
+    io::copy(&mut decrypted_file, &mut file)?;
 
     println!("Track {} downloaded successfully", filename);
 
@@ -240,6 +243,7 @@ async fn main() -> Result<(), Error> {
 
     let args = Args::parse();
     let spotify_uri = SpotifyUri::from_uri(&args.uri)?;
+    let base_dir = args.dest_dir;
 
     let session_config = SessionConfig::default();
     // TODO: investigate why the credentials are not actually stored
@@ -266,7 +270,7 @@ async fn main() -> Result<(), Error> {
         SpotifyUri::Track { id } => {
             let uri = SpotifyUri::Track { id };
             let track = Track::get(&session, &uri).await?;
-            download_track(track, &session).await?;
+            download_track(&base_dir, track, &session).await?;
         }
         SpotifyUri::Album { id } => {
             let uri = SpotifyUri::Album { id };
@@ -274,7 +278,7 @@ async fn main() -> Result<(), Error> {
             println!("Downloading album {}...", album.name);
             for track_uri in album.tracks() {
                 let track = Track::get(&session, track_uri).await?;
-                download_track(track, &session).await?;
+                download_track(&base_dir, track, &session).await?;
             }
         }
         SpotifyUri::Playlist { id, .. } => {
@@ -283,7 +287,7 @@ async fn main() -> Result<(), Error> {
             println!("Downloading playlist {}...", playlist.name());
             for track_uri in playlist.tracks() {
                 let track = Track::get(&session, track_uri).await?;
-                download_track(track, &session).await?;
+                retry(|| download_track(&base_dir, track.clone(), &session)).await?;
             }
         }
         _ => {
