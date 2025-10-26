@@ -21,8 +21,6 @@
 //! Authentication is handled by caching credentials in the `.cache` directory. If you are running
 //! this example for the first time, you will be prompted to login in your browser.
 
-use std::{fs::File, io, path::Path};
-
 use clap::Parser;
 use librespot::{
     audio::{AudioDecrypt, AudioFile},
@@ -30,11 +28,19 @@ use librespot::{
         Error, SpotifyUri, authentication::Credentials, cache::Cache, config::SessionConfig,
         session::Session,
     },
-    metadata::{Album, Metadata, Playlist, Track, audio::file::AudioFileFormat},
+    metadata::{Album, Metadata, Playlist, Track, audio::AudioFiles, audio::file::AudioFileFormat},
+    playback::player::{NormalisationData, SPOTIFY_OGG_HEADER_END, Subfile},
 };
-use log::LevelFilter;
+use log::{LevelFilter, error, info, warn};
 use rand::RngCore;
+use regex::Regex;
+use std::io::{Read, Seek, SeekFrom};
 use std::process::Command;
+use std::{
+    fs::{self, File},
+    io,
+    path::Path,
+};
 
 const CACHE: &str = ".cache";
 const CACHE_FILES: &str = ".cache/files";
@@ -75,19 +81,18 @@ fn stream_data_rate(format: AudioFileFormat) -> Option<usize> {
     Some(data_rate.ceil() as usize)
 }
 
-async fn retry<T, E, F, Fut>(mut operation: F) -> Result<T, E>
+async fn retry<T, E, F, Fut>(max_attempts: u8, mut operation: F) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
     E: std::fmt::Debug,
 {
-    let max_attempts = 5;
     let mut rng = rand::thread_rng();
     for attempt in 1..=max_attempts {
         match operation().await {
             Ok(result) => return Ok(result),
             Err(err) => {
-                println!("Attempt {} failed: {:?}", attempt, err);
+                warn!("Attempt {} failed: {:?}", attempt, err);
                 if attempt == max_attempts {
                     return Err(err);
                 }
@@ -120,6 +125,28 @@ fn format_extension(format: AudioFileFormat) -> Option<String> {
     }
 }
 
+fn normalize_filename(n: &str) -> String {
+    let re_to_underscore = Regex::new(r"[ ']").unwrap();
+    let re_to_empty = Regex::new(r"[^0-9a-zA-Z_\-]").unwrap();
+    let ret = re_to_underscore.replace_all(n, "_");
+    let ret = re_to_empty.replace_all(&ret, "");
+    ret.to_string()
+}
+
+fn get_seekable_len(reader: &mut (impl Read + Seek)) -> Result<u64, Error> {
+    // 1. Get the current position so we can restore it later
+    let current_pos = reader.stream_position()?;
+
+    // 2. Seek to the end of the stream
+    // seek(SeekFrom::End(0)) returns the new position, which is the length
+    let len = reader.seek(SeekFrom::End(0))?;
+
+    // 3. Restore the original position so the reader can be used again
+    reader.seek(SeekFrom::Start(current_pos))?;
+
+    Ok(len)
+}
+
 async fn download_track(base_dir: &str, track: Track, session: &Session) -> Result<(), Error> {
     let artists = track
         .artists
@@ -133,6 +160,8 @@ async fn download_track(base_dir: &str, track: Track, session: &Session) -> Resu
     } else {
         return Err(Error::invalid_argument("Not a track URI"));
     };
+
+    eprintln!("seravallog[9]: {}:{}: track={:#?}", file!(), line!(), track);
 
     let formats = [
         AudioFileFormat::FLAC_FLAC,
@@ -160,37 +189,57 @@ async fn download_track(base_dir: &str, track: Track, session: &Session) -> Resu
         "Could not find extension for {:?}",
         format
     )))?;
-    let filename = format!(
-        "{}/{}_{}_{}.{}",
-        base_dir,
-        artists,
-        track.name,
-        spotify_id.to_base62()?,
-        ext
+    let filename = normalize_filename(
+        format!("{}_{}_{}", artists, track.name, spotify_id.to_base62()?).as_str(),
     );
+    let file_path = format!("{}/{}.{}", base_dir, filename, ext);
 
-    if Path::new(&filename).exists() {
-        println!("Track {} already exists, skipping", filename);
+    if Path::new(&file_path).exists() {
+        info!("Track {} already exists, skipping", file_path);
         return Ok(());
     }
 
-    println!("Downloading track {}...", filename);
+    info!("Downloading track {}...", file_path);
 
     let bytes_per_second = stream_data_rate(format).ok_or(Error::unavailable(format!(
         "Could not convert provided format: {:?}",
         format
     )))?;
-    let enctypted_file = retry(|| AudioFile::open(session, file_id, bytes_per_second)).await?;
+    let enctypted_file = retry(5, || AudioFile::open(session, file_id, bytes_per_second)).await?;
 
-    let key = retry(|| session.audio_key().request(spotify_id, file_id)).await?;
+    let key = retry(5, || session.audio_key().request(spotify_id, file_id)).await?;
     let mut decrypted_file = AudioDecrypt::new(Some(key), enctypted_file);
 
-    let mut file = File::create(&filename)?;
-    io::copy(&mut decrypted_file, &mut file)?;
+    let is_ogg_vorbis = AudioFiles::is_ogg_vorbis(format);
+    let (offset, mut normalisation_data) = if is_ogg_vorbis {
+        // Spotify stores normalisation data in a custom Ogg packet instead of Vorbis comments.
+        let normalisation_data = NormalisationData::parse_from_ogg(&mut decrypted_file).ok();
+        (SPOTIFY_OGG_HEADER_END, normalisation_data)
+    } else {
+        return Err(Error::internal(format!(
+            "Format must be ogg, bug was {:?}",
+            format
+        )));
+    };
+    let dec_len = get_seekable_len(&mut decrypted_file)?;
 
-    println!("Track {} downloaded successfully", filename);
+    let mut audio_file = Subfile::new(decrypted_file, offset, dec_len)?;
 
-    tag_file(format, &filename, &artists, &track).await?;
+    // We use a block to close the file once the copy is performed.
+    {
+        let mut file = File::create(&file_path)?;
+        if let Err(e) = io::copy(&mut audio_file, &mut file) {
+            error!("Failed to copy track {}: {:?}", track.name, e);
+            fs::remove_file(&file_path)?;
+        }
+    }
+
+    info!("Track {} downloaded successfully", file_path);
+
+    if let Err(e) = retry(3, || tag_file(format, &file_path, &artists, &track)).await {
+        error!("Failed to tag track {}: {:?}", track.name, e);
+        fs::remove_file(&file_path)?;
+    }
 
     Ok(())
 }
@@ -201,6 +250,7 @@ async fn tag_file(
     artist: &str,
     track: &Track,
 ) -> Result<(), Error> {
+    // TODO: use the function from the player
     match format {
         AudioFileFormat::OGG_VORBIS_320
         | AudioFileFormat::OGG_VORBIS_160
@@ -275,7 +325,7 @@ async fn main() -> Result<(), Error> {
         SpotifyUri::Album { id } => {
             let uri = SpotifyUri::Album { id };
             let album = Album::get(&session, &uri).await?;
-            println!("Downloading album {}...", album.name);
+            info!("Downloading album {}...", album.name);
             for track_uri in album.tracks() {
                 let track = Track::get(&session, track_uri).await?;
                 download_track(&base_dir, track, &session).await?;
@@ -284,14 +334,42 @@ async fn main() -> Result<(), Error> {
         SpotifyUri::Playlist { id, .. } => {
             let uri = SpotifyUri::Playlist { id, user: None };
             let playlist = Playlist::get(&session, &uri).await?;
-            println!("Downloading playlist {}...", playlist.name());
+            info!("Downloading playlist {}...", playlist.name());
             for track_uri in playlist.tracks() {
+                // TODO: improve this mess
                 let track = Track::get(&session, track_uri).await?;
-                retry(|| download_track(&base_dir, track.clone(), &session)).await?;
+                if track.files.is_empty() {
+                    for uri in track.alternatives.iter() {
+                        let track = Track::get(&session, uri).await?;
+                        if let Err(e) =
+                            retry(5, || download_track(&base_dir, track.clone(), &session)).await
+                        {
+                            error!(
+                                "Failed to download track {} {}: {:?}",
+                                track.name,
+                                track.id.to_uri().unwrap(),
+                                e
+                            );
+                        } else {
+                            break;
+                        }
+                    }
+                } else {
+                    if let Err(e) =
+                        retry(5, || download_track(&base_dir, track.clone(), &session)).await
+                    {
+                        error!(
+                            "Failed to download track {} {}: {:?}",
+                            track.name,
+                            track.id.to_uri().unwrap(),
+                            e
+                        );
+                    }
+                }
             }
         }
         _ => {
-            println!("Unsupported URI type: {:?}", spotify_uri);
+            error!("Unsupported URI type: {:?}", spotify_uri);
         }
     }
 

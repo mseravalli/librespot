@@ -185,6 +185,7 @@ clap = { version = "4.0", features = ["derive"] }
 
 [dev-dependencies]
 rand = {version = "0"}
+regex = {version = "1"}
 
 [[example]]
 name = "get_token"

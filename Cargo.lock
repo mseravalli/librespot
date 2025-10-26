@@ -1854,6 +1854,7 @@ dependencies = [
  "librespot-protocol",
  "log",
  "rand 0.8.5",
+ "regex",
  "sha1",
  "sysinfo",
  "thiserror 2.0.17",

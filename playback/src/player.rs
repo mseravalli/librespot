@@ -48,7 +48,7 @@ pub const PCM_AT_0DBFS: f64 = 1.0;
 
 // Spotify inserts a custom Ogg packet at the start with custom metadata values, that you would
 // otherwise expect in Vorbis comments. This packet isn't well-formed and players may balk at it.
-const SPOTIFY_OGG_HEADER_END: u64 = 0xa7;
+pub const SPOTIFY_OGG_HEADER_END: u64 = 0xa7;
 
 const LOAD_HANDLES_POISON_MSG: &str = "load handles mutex should not be poisoned";
 
@@ -328,7 +328,7 @@ impl Default for NormalisationData {
 }
 
 impl NormalisationData {
-    fn parse_from_ogg<T: Read + Seek>(mut file: T) -> io::Result<NormalisationData> {
+    pub fn parse_from_ogg<T: Read + Seek>(mut file: T) -> io::Result<NormalisationData> {
         const SPOTIFY_NORMALIZATION_HEADER_START_OFFSET: u64 = 144;
         const NORMALISATION_DATA_SIZE: usize = 16;
 
@@ -2586,7 +2586,7 @@ impl fmt::Debug for PlayerState {
     }
 }
 
-struct Subfile<T: Read + Seek> {
+pub struct Subfile<T: Read + Seek> {
     stream: T,
     offset: u64,
     length: u64,
