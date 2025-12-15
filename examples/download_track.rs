@@ -161,8 +161,6 @@ async fn download_track(base_dir: &str, track: Track, session: &Session) -> Resu
         return Err(Error::invalid_argument("Not a track URI"));
     };
 
-    eprintln!("seravallog[9]: {}:{}: track={:#?}", file!(), line!(), track);
-
     let formats = [
         AudioFileFormat::FLAC_FLAC,
         AudioFileFormat::OGG_VORBIS_320,
@@ -190,7 +188,7 @@ async fn download_track(base_dir: &str, track: Track, session: &Session) -> Resu
         format
     )))?;
     let filename = normalize_filename(
-        format!("{}_{}_{}", artists, track.name, spotify_id.to_base62()?).as_str(),
+        format!("{}_{}_{}", artists, track.name, spotify_id.to_base62()).as_str(),
     );
     let file_path = format!("{}/{}.{}", base_dir, filename, ext);
 
@@ -211,7 +209,7 @@ async fn download_track(base_dir: &str, track: Track, session: &Session) -> Resu
     let mut decrypted_file = AudioDecrypt::new(Some(key), enctypted_file);
 
     let is_ogg_vorbis = AudioFiles::is_ogg_vorbis(format);
-    let (offset, mut normalisation_data) = if is_ogg_vorbis {
+    let (offset, _normalisation_data) = if is_ogg_vorbis {
         // Spotify stores normalisation data in a custom Ogg packet instead of Vorbis comments.
         let normalisation_data = NormalisationData::parse_from_ogg(&mut decrypted_file).ok();
         (SPOTIFY_OGG_HEADER_END, normalisation_data)
@@ -347,7 +345,7 @@ async fn main() -> Result<(), Error> {
                             error!(
                                 "Failed to download track {} {}: {:?}",
                                 track.name,
-                                track.id.to_uri().unwrap(),
+                                track.id.to_uri(),
                                 e
                             );
                         } else {
@@ -361,7 +359,7 @@ async fn main() -> Result<(), Error> {
                         error!(
                             "Failed to download track {} {}: {:?}",
                             track.name,
-                            track.id.to_uri().unwrap(),
+                            track.id.to_uri(),
                             e
                         );
                     }
